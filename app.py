@@ -18,7 +18,7 @@ except:
     GEMINI_API_KEY = "여기에_진짜_키를_넣어도_됩니다"
 
 # 모델 설정 (3.0 Pro Preview)
-MODEL_NAME = "gemini-3.0-pro-preview" 
+MODEL_NAME = "models/gemini-3-pro-preview" 
 
 # AI 연결
 try:
@@ -146,3 +146,4 @@ with st.sidebar:
                     st.code(m.name) 
         except Exception as e:
             st.error(f"목록 조회 실패: {e}")
+
