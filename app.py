@@ -132,18 +132,4 @@ with col2:
 st.markdown("---")
 st.markdown("Created with Python & Streamlit | Model: Google Gemini 3.0 pro")
 
-# ==========================================
-# [긴급 추가] 모델 이름 찾기 (사이드바)
-# ==========================================
-with st.sidebar:
-    st.header("🛠️ 모델 진단 도구")
-    if st.button("내 키로 쓸 수 있는 모델 목록 보기"):
-        try:
-            st.write("🔍 검색 중...")
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    # 진짜 모델 ID를 화면에 출력 (복사해서 쓰세요!)
-                    st.code(m.name) 
-        except Exception as e:
-            st.error(f"목록 조회 실패: {e}")
 
