@@ -7,13 +7,18 @@ import google.generativeai as genai
 from datetime import datetime, timedelta
 
 # ==========================================
-# [설정] ⚠️ 여기에 구글 AI 키를 넣어주세요!
+# [설정] 클라우드 배포용 보안 설정 (수정됨)
 # ==========================================
 try:
+    # 1. 클라우드 금고(Secrets)에서 키를 꺼내 시도합니다.
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-MODEL_NAME = "gemini-3-pro-preview" # 사용할 모델 (무료: gemini-1.5-flash / 유료: gemini-3-pro-preview)
+except:
+    # 2. 실패하면(로컬이면) 그냥 빈 문자열을 넣거나 내 키를 넣습니다.
+    # (오류가 났던 이유는 이 'except' 줄이 없었기 때문입니다!)
+    GEMINI_API_KEY = "여기에_진짜_키를_넣어도_됩니다"
 
-
+# 모델 설정 (3.0 Pro Preview)
+MODEL_NAME = "gemini-3.0-pro-preview" 
 
 # AI 연결
 try:
