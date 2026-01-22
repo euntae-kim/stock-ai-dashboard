@@ -85,9 +85,14 @@ except Exception as e:
     model = None
 
 # ==========================================
-# [5. 기능 함수] 뉴스 소스 4분할 및 분석
+# [5. 기능 함수] 뉴스 소스 4분할 및 분석 (강제 출력 로직 추가)
 # ==========================================
-# (get_stock_data 함수는 기존과 동일하므로 생략하거나 기존 것 유지)
+class MockEntry:
+    """뉴스가 없을 때 사용할 빈 객체"""
+    def __init__(self, title, link):
+        self.title = title
+        self.link = link
+
 @st.cache_data
 def get_stock_data():
     """ 안정적인 일간(Daily) 데이터 수집 """
@@ -108,20 +113,26 @@ def get_stock_data():
             pass
     return pd.concat(data_list, axis=1).ffill() if data_list else pd.DataFrame()
 
-# [핵심 변경] 뉴스 카테고리 정보까지 받아서 분석
 def analyze_single_news(item):
-    """
-    item: (entry, category) 형태의 튜플
-    """
+    """ item: (entry, category) 형태의 튜플 """
     entry, category = item
     
+    # 1. 뉴스가 없는 경우 (MockEntry 감지)
+    if entry.link == "":
+        return {
+            "title": entry.title, 
+            "link": "#", 
+            "category": category, 
+            "ai_comment": "현재 이 분야의 주요 뉴스가 검색되지 않았습니다. 잠시 후 다시 시도해 주세요."
+        }
+
+    # 2. API 키 확인
     if not model:
         return {"title": entry.title, "link": entry.link, "category": category, "ai_comment": "API 키 연결 실패"}
 
     try:
         detail_level = "심층적으로" if "pro" in MODEL_NAME else "직관적으로"
         
-        # 카테고리별 맞춤 프롬프트
         prompt = f"""
         당신은 거시경제와 증시를 아우르는 30대 퀀트 투자자입니다.
         현재 분석 대상 분야: [{category}]
@@ -138,35 +149,48 @@ def analyze_single_news(item):
         return {
             "title": entry.title,
             "link": entry.link,
-            "category": category, # 카테고리 정보 유지
+            "category": category,
             "ai_comment": response.text.strip()
         }
     except Exception:
         return {"title": entry.title, "link": entry.link, "category": category, "ai_comment": "분석 실패"}
 
 def get_ai_summary():
-    # 4가지 핵심 분야 정의 (구글 뉴스 검색어 최적화)
-    search_queries = {
-        "🇺🇸 미국 실물경제": "미국 경제 지표 금리 물가",
-        "🇺🇸 미국 증시": "미국 증시 나스닥 S&P500",
-        "🇰🇷 한국 실물경제": "한국 경제 수출 금리 내수",
-        "🇰🇷 한국 증시": "한국 증시 코스피 삼성전자"
+    # [핵심 수정] 1차 검색어(구체적) -> 실패 시 2차 검색어(광범위)
+    search_map = {
+        "🇺🇸 미국 실물경제": ["미국 경제 지표 CPI 금리", "미국 경제"],
+        "🇺🇸 미국 증시": ["미국 증시 나스닥 S&P500", "뉴욕 증시"],
+        "🇰🇷 한국 실물경제": ["한국 경제 수출 금리", "한국 경제"],
+        "🇰🇷 한국 증시": ["한국 증시 코스피 삼성전자", "국내 주식"]
     }
     
     tasks = []
     
-    # 각 분야별로 최신 뉴스 1개씩만 엄선해서 가져옴 (총 4개)
-    for category, query in search_queries.items():
-        # 검색어 URL 인코딩
-        encoded_query = query.replace(" ", "+")
-        rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=ko&gl=KR&ceid=KR:ko"
-        feed = feedparser.parse(rss_url)
+    for category, queries in search_map.items():
+        found_entry = None
         
-        if feed.entries:
-            # (뉴스기사, 카테고리) 튜플 형태로 저장
-            tasks.append((feed.entries[0], category))
+        # 1. 1차, 2차 검색어를 순서대로 시도
+        for query in queries:
+            try:
+                encoded_query = query.replace(" ", "+")
+                rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=ko&gl=KR&ceid=KR:ko"
+                feed = feedparser.parse(rss_url)
+                
+                if feed.entries:
+                    found_entry = feed.entries[0]
+                    break # 찾았으면 멈춤
+            except Exception:
+                continue
+        
+        # 2. 결과 처리 (있으면 추가, 없으면 빈 껍데기 추가)
+        if found_entry:
+            tasks.append((found_entry, category))
+        else:
+            # 뉴스를 못 찾았더라도 자리는 채워야 함 (빈 객체 생성)
+            dummy = MockEntry(title="관련된 최신 뉴스가 없습니다.", link="")
+            tasks.append((dummy, category))
     
-    # 병렬 처리 (4개를 동시에 분석)
+    # 병렬 처리
     with concurrent.futures.ThreadPoolExecutor() as executor:
         results = list(executor.map(analyze_single_news, tasks))
         
