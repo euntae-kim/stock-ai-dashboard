@@ -85,8 +85,10 @@ except Exception as e:
     model = None
 
 # ==========================================
-# [5. 기능 함수] 뉴스 소스 4분할 및 분석 (검색어 최적화)
+# [5. 기능 함수] 뉴스 소스 4분할 및 분석 (안전 필터 해제)
 # ==========================================
+from google.generativeai.types import HarmCategory, HarmBlockThreshold # 필터 설정을 위한 도구 가져오기
+
 class MockEntry:
     """뉴스가 없을 때 사용할 빈 객체"""
     def __init__(self, title, link):
@@ -133,7 +135,6 @@ def analyze_single_news(item):
     try:
         detail_level = "심층적으로" if "pro" in MODEL_NAME else "명확하게"
         
-        # 프롬프트 강화: 빈 답변 방지
         prompt = f"""
         당신은 30대 퀀트 투자자입니다. 아래 뉴스 제목을 보고 투자 관점에서 분석해주세요.
         
@@ -148,12 +149,21 @@ def analyze_single_news(item):
         
         *반드시 '친근한 해요체'로 작성하고, 절대 빈칸으로 두지 마세요.*
         """
-        response = model.generate_content(prompt)
+        
+        # [핵심 수정] 안전 필터 강제 해제 (모든 내용을 차단하지 않고 표시)
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+
+        # 설정 적용하여 생성 요청
+        response = model.generate_content(prompt, safety_settings=safety_settings)
         result_text = response.text.strip()
         
-        # [수정] AI가 가끔 빈 텍스트를 줄 경우 방어 로직
         if not result_text:
-            result_text = "AI가 뉴스 내용을 분석하는 데 실패했습니다. 원문을 참고해주세요."
+            result_text = "AI 분석 결과가 비어있습니다. (원문을 참고해주세요)"
 
         return {
             "title": entry.title,
@@ -162,13 +172,17 @@ def analyze_single_news(item):
             "ai_comment": result_text
         }
     except Exception as e:
-        return {"title": entry.title, "link": entry.link, "category": category, "ai_comment": f"분석 중 오류 발생: {str(e)}"}
+        # 에러가 나더라도 '오류 메시지'를 띄워서 링크만 나오는 현상 방지
+        return {
+            "title": entry.title, 
+            "link": entry.link, 
+            "category": category, 
+            "ai_comment": f"⚠️ 분석 중 오류가 발생했습니다: {str(e)}"
+        }
 
 def get_ai_summary():
-    # [핵심 수정] 검색어 단순화 (너무 길면 RSS 결과가 0개가 뜸)
-    # 복잡한 검색어("지표 CPI 금리")를 제거하고 가장 확실한 키워드로 변경
     search_map = {
-        "🇺🇸 미국 실물경제": ["미국 경제 뉴스", "미국 연준"], # 검색어 변경됨
+        "🇺🇸 미국 실물경제": ["미국 경제 뉴스", "미국 연준"],
         "🇺🇸 미국 증시": ["미국 증시", "나스닥", "뉴욕 증시"],
         "🇰🇷 한국 실물경제": ["한국 경제", "한국 수출", "한국 금리"],
         "🇰🇷 한국 증시": ["한국 증시", "코스피", "국내 주식"]
@@ -178,15 +192,11 @@ def get_ai_summary():
     
     for category, queries in search_map.items():
         found_entry = None
-        
-        # 1차, 2차, 3차 검색어 시도
         for query in queries:
             try:
                 encoded_query = query.replace(" ", "+")
-                # hl=ko (한국어), gl=KR (한국지역), ceid=KR:ko (한국판) 옵션 필수
                 rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=ko&gl=KR&ceid=KR:ko"
                 feed = feedparser.parse(rss_url)
-                
                 if feed.entries:
                     found_entry = feed.entries[0]
                     break 
@@ -199,7 +209,6 @@ def get_ai_summary():
             dummy = MockEntry(title=f"'{category}' 관련 최신 기사가 없습니다.", link="")
             tasks.append((dummy, category))
     
-    # 병렬 처리
     with concurrent.futures.ThreadPoolExecutor() as executor:
         results = list(executor.map(analyze_single_news, tasks))
         
