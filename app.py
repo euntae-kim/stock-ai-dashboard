@@ -85,9 +85,10 @@ except Exception as e:
     model = None
 
 # ==========================================
-# [5. 기능 함수] 뉴스 소스 4분할 및 분석 (안전 필터 해제)
+# [5. 기능 함수] 뉴스 소스 4분할 및 분석 (4개 슬롯 강제 고정)
 # ==========================================
-from google.generativeai.types import HarmCategory, HarmBlockThreshold # 필터 설정을 위한 도구 가져오기
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+import time
 
 class MockEntry:
     """뉴스가 없을 때 사용할 빈 객체"""
@@ -119,13 +120,13 @@ def analyze_single_news(item):
     """ item: (entry, category) 형태의 튜플 """
     entry, category = item
     
-    # 1. 링크가 없는 경우 (검색 실패)
-    if entry.link == "":
+    # 1. 가짜 뉴스(Mock)인 경우 바로 리턴
+    if entry.link == "" or entry.link == "#":
         return {
             "title": entry.title, 
             "link": "#", 
             "category": category, 
-            "ai_comment": "현재 관련 뉴스가 검색되지 않았습니다."
+            "ai_comment": "현재 이 분야의 최신 뉴스를 가져오지 못했습니다. (검색 결과 없음)"
         }
 
     # 2. API 키 확인
@@ -136,21 +137,18 @@ def analyze_single_news(item):
         detail_level = "심층적으로" if "pro" in MODEL_NAME else "명확하게"
         
         prompt = f"""
-        당신은 30대 퀀트 투자자입니다. 아래 뉴스 제목을 보고 투자 관점에서 분석해주세요.
-        
-        [뉴스 정보]
+        당신은 30대 퀀트 투자자입니다. 
         분야: {category}
-        제목: "{entry.title}"
+        기사 제목: "{entry.title}"
         
-        [요청사항]
         1. 내용 요약 (한 줄)
         2. 호재/악재/중립 판단
         3. 투자자 대응 ({detail_level})
         
-        *반드시 '친근한 해요체'로 작성하고, 절대 빈칸으로 두지 마세요.*
+        '친근한 해요체'로 3줄 이내 답변. 빈칸 금지.
         """
         
-        # [핵심 수정] 안전 필터 강제 해제 (모든 내용을 차단하지 않고 표시)
+        # [안전 필터 해제 유지]
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -158,12 +156,11 @@ def analyze_single_news(item):
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
 
-        # 설정 적용하여 생성 요청
         response = model.generate_content(prompt, safety_settings=safety_settings)
         result_text = response.text.strip()
         
         if not result_text:
-            result_text = "AI 분석 결과가 비어있습니다. (원문을 참고해주세요)"
+            result_text = "AI 분석 결과가 비어있습니다. 원문을 확인해주세요."
 
         return {
             "title": entry.title,
@@ -172,43 +169,51 @@ def analyze_single_news(item):
             "ai_comment": result_text
         }
     except Exception as e:
-        # 에러가 나더라도 '오류 메시지'를 띄워서 링크만 나오는 현상 방지
         return {
             "title": entry.title, 
             "link": entry.link, 
             "category": category, 
-            "ai_comment": f"⚠️ 분석 중 오류가 발생했습니다: {str(e)}"
+            "ai_comment": f"분석 중 오류가 발생했습니다. ({str(e)})"
         }
 
 def get_ai_summary():
-    search_map = {
-        "🇺🇸 미국 실물경제": ["미국 경제 뉴스", "미국 연준"],
-        "🇺🇸 미국 증시": ["미국 증시", "나스닥", "뉴욕 증시"],
-        "🇰🇷 한국 실물경제": ["한국 경제", "한국 수출", "한국 금리"],
-        "🇰🇷 한국 증시": ["한국 증시", "코스피", "국내 주식"]
-    }
+    # [핵심] 4개의 카테고리를 리스트로 고정 (순서 보장)
+    # (카테고리명, [1순위 검색어, 2순위 검색어])
+    target_categories = [
+        ("🇺🇸 미국 실물경제", ["미국 경제 뉴스", "미국 연준 금리", "Federal Reserve"]),
+        ("🇺🇸 미국 증시", ["미국 증시", "나스닥 선물", "S&P500"]),
+        ("🇰🇷 한국 실물경제", ["한국 경제 뉴스", "한국 수출입", "한국은행 금리"]),
+        ("🇰🇷 한국 증시", ["한국 증시", "코스피 시황", "삼성전자 주가"])
+    ]
     
     tasks = []
     
-    for category, queries in search_map.items():
+    # 4번 반복하면서 무조건 채워넣음
+    for category, queries in target_categories:
         found_entry = None
+        
+        # 검색어 돌아가면서 시도
         for query in queries:
             try:
                 encoded_query = query.replace(" ", "+")
                 rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=ko&gl=KR&ceid=KR:ko"
                 feed = feedparser.parse(rss_url)
-                if feed.entries:
+                
+                if feed.entries and len(feed.entries) > 0:
                     found_entry = feed.entries[0]
-                    break 
+                    break # 찾았으면 루프 탈출
             except Exception:
                 continue
         
+        # [절대 규칙] 찾았으면 넣고, 못 찾았으면 '가짜 뉴스'라도 만들어서 넣는다.
         if found_entry:
             tasks.append((found_entry, category))
         else:
-            dummy = MockEntry(title=f"'{category}' 관련 최신 기사가 없습니다.", link="")
+            # 여기가 실행되면 화면에 '검색 실패'라고 뜨더라도 박스는 생깁니다.
+            dummy = MockEntry(title="최신 기사를 찾지 못했습니다.", link="#")
             tasks.append((dummy, category))
     
+    # 병렬 처리
     with concurrent.futures.ThreadPoolExecutor() as executor:
         results = list(executor.map(analyze_single_news, tasks))
         
