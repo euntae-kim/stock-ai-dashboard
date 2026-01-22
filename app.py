@@ -85,7 +85,7 @@ except Exception as e:
     model = None
 
 # ==========================================
-# [5. 기능 함수] 뉴스 소스 4분할 및 분석 (강제 출력 로직 추가)
+# [5. 기능 함수] 뉴스 소스 4분할 및 분석 (검색어 최적화)
 # ==========================================
 class MockEntry:
     """뉴스가 없을 때 사용할 빈 객체"""
@@ -117,51 +117,61 @@ def analyze_single_news(item):
     """ item: (entry, category) 형태의 튜플 """
     entry, category = item
     
-    # 1. 뉴스가 없는 경우 (MockEntry 감지)
+    # 1. 링크가 없는 경우 (검색 실패)
     if entry.link == "":
         return {
             "title": entry.title, 
             "link": "#", 
             "category": category, 
-            "ai_comment": "현재 이 분야의 주요 뉴스가 검색되지 않았습니다. 잠시 후 다시 시도해 주세요."
+            "ai_comment": "현재 관련 뉴스가 검색되지 않았습니다."
         }
 
     # 2. API 키 확인
     if not model:
-        return {"title": entry.title, "link": entry.link, "category": category, "ai_comment": "API 키 연결 실패"}
+        return {"title": entry.title, "link": entry.link, "category": category, "ai_comment": "API 키를 확인해주세요."}
 
     try:
-        detail_level = "심층적으로" if "pro" in MODEL_NAME else "직관적으로"
+        detail_level = "심층적으로" if "pro" in MODEL_NAME else "명확하게"
         
+        # 프롬프트 강화: 빈 답변 방지
         prompt = f"""
-        당신은 거시경제와 증시를 아우르는 30대 퀀트 투자자입니다.
-        현재 분석 대상 분야: [{category}]
+        당신은 30대 퀀트 투자자입니다. 아래 뉴스 제목을 보고 투자 관점에서 분석해주세요.
         
-        뉴스 제목: "{entry.title}"
+        [뉴스 정보]
+        분야: {category}
+        제목: "{entry.title}"
         
-        1. 핵심 내용 (한 줄)
-        2. {category} 관점에서의 영향 (호재/악재/중립)
+        [요청사항]
+        1. 내용 요약 (한 줄)
+        2. 호재/악재/중립 판단
         3. 투자자 대응 ({detail_level})
         
-        '해요체'로, 3줄 이내 답변.
+        *반드시 '친근한 해요체'로 작성하고, 절대 빈칸으로 두지 마세요.*
         """
         response = model.generate_content(prompt)
+        result_text = response.text.strip()
+        
+        # [수정] AI가 가끔 빈 텍스트를 줄 경우 방어 로직
+        if not result_text:
+            result_text = "AI가 뉴스 내용을 분석하는 데 실패했습니다. 원문을 참고해주세요."
+
         return {
             "title": entry.title,
             "link": entry.link,
             "category": category,
-            "ai_comment": response.text.strip()
+            "ai_comment": result_text
         }
-    except Exception:
-        return {"title": entry.title, "link": entry.link, "category": category, "ai_comment": "분석 실패"}
+    except Exception as e:
+        return {"title": entry.title, "link": entry.link, "category": category, "ai_comment": f"분석 중 오류 발생: {str(e)}"}
 
 def get_ai_summary():
-    # [핵심 수정] 1차 검색어(구체적) -> 실패 시 2차 검색어(광범위)
+    # [핵심 수정] 검색어 단순화 (너무 길면 RSS 결과가 0개가 뜸)
+    # 복잡한 검색어("지표 CPI 금리")를 제거하고 가장 확실한 키워드로 변경
     search_map = {
-        "🇺🇸 미국 실물경제": ["미국 경제 지표 CPI 금리", "미국 경제"],
-        "🇺🇸 미국 증시": ["미국 증시 나스닥 S&P500", "뉴욕 증시"],
-        "🇰🇷 한국 실물경제": ["한국 경제 수출 금리", "한국 경제"],
-        "🇰🇷 한국 증시": ["한국 증시 코스피 삼성전자", "국내 주식"]
+        "🇺🇸 미국 실물경제": ["미국 경제 뉴스", "미국 연준"], # 검색어 변경됨
+        "🇺🇸 미국 증시": ["미국 증시", "나스닥", "뉴욕 증시"],
+        "🇰🇷 한국 실물경제": ["한국 경제", "한국 수출", "한국 금리"],
+        "🇰🇷 한국 증시": ["한국 증시", "코스피", "국내 주식"]
     }
     
     tasks = []
@@ -169,25 +179,24 @@ def get_ai_summary():
     for category, queries in search_map.items():
         found_entry = None
         
-        # 1. 1차, 2차 검색어를 순서대로 시도
+        # 1차, 2차, 3차 검색어 시도
         for query in queries:
             try:
                 encoded_query = query.replace(" ", "+")
+                # hl=ko (한국어), gl=KR (한국지역), ceid=KR:ko (한국판) 옵션 필수
                 rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=ko&gl=KR&ceid=KR:ko"
                 feed = feedparser.parse(rss_url)
                 
                 if feed.entries:
                     found_entry = feed.entries[0]
-                    break # 찾았으면 멈춤
+                    break 
             except Exception:
                 continue
         
-        # 2. 결과 처리 (있으면 추가, 없으면 빈 껍데기 추가)
         if found_entry:
             tasks.append((found_entry, category))
         else:
-            # 뉴스를 못 찾았더라도 자리는 채워야 함 (빈 객체 생성)
-            dummy = MockEntry(title="관련된 최신 뉴스가 없습니다.", link="")
+            dummy = MockEntry(title=f"'{category}' 관련 최신 기사가 없습니다.", link="")
             tasks.append((dummy, category))
     
     # 병렬 처리
