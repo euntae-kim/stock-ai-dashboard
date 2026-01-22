@@ -85,23 +85,15 @@ except Exception as e:
     model = None
 
 # ==========================================
-# [5. 기능 함수] 데이터 수집
+# [5. 기능 함수] 뉴스 소스 4분할 및 분석
 # ==========================================
+# (get_stock_data 함수는 기존과 동일하므로 생략하거나 기존 것 유지)
 @st.cache_data
 def get_stock_data():
-    """ 
-    안정적인 일간(Daily) 데이터만 수집합니다. 
-    (1일/분봉 데이터 삭제됨)
-    """
+    """ 안정적인 일간(Daily) 데이터 수집 """
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=365) # 1년치
-    
-    tickers = {
-        'TIGER 200 (KR)': '102110.KS',
-        'QQQ (US Nasdaq)': 'QQQ',
-        'SPY (US S&P500)': 'SPY',
-        'USD/KRW': 'KRW=X' # 환율 필수
-    }
+    start_date = end_date - timedelta(days=365)
+    tickers = {'TIGER 200 (KR)': '102110.KS', 'QQQ (US Nasdaq)': 'QQQ', 'SPY (US S&P500)': 'SPY', 'USD/KRW': 'KRW=X'}
     
     data_list = []
     for name, code in tickers.items():
@@ -114,39 +106,74 @@ def get_stock_data():
                 data_list.append(series)
         except Exception:
             pass
-            
     return pd.concat(data_list, axis=1).ffill() if data_list else pd.DataFrame()
 
-def analyze_single_news(entry):
+# [핵심 변경] 뉴스 카테고리 정보까지 받아서 분석
+def analyze_single_news(item):
+    """
+    item: (entry, category) 형태의 튜플
+    """
+    entry, category = item
+    
     if not model:
-        return {"title": entry.title, "link": entry.link, "ai_comment": "API 키 연결 실패"}
+        return {"title": entry.title, "link": entry.link, "category": category, "ai_comment": "API 키 연결 실패"}
 
     try:
         detail_level = "심층적으로" if "pro" in MODEL_NAME else "직관적으로"
+        
+        # 카테고리별 맞춤 프롬프트
         prompt = f"""
-        당신은 한국의 30대 퀀트 투자자입니다.
+        당신은 거시경제와 증시를 아우르는 30대 퀀트 투자자입니다.
+        현재 분석 대상 분야: [{category}]
+        
         뉴스 제목: "{entry.title}"
-        1. 핵심 내용 요약 (한 줄)
-        2. 호재/악재 판단
-        3. 대응 전략 ({detail_level})
+        
+        1. 핵심 내용 (한 줄)
+        2. {category} 관점에서의 영향 (호재/악재/중립)
+        3. 투자자 대응 ({detail_level})
+        
         '해요체'로, 3줄 이내 답변.
         """
         response = model.generate_content(prompt)
-        return {"title": entry.title, "link": entry.link, "ai_comment": response.text.strip()}
+        return {
+            "title": entry.title,
+            "link": entry.link,
+            "category": category, # 카테고리 정보 유지
+            "ai_comment": response.text.strip()
+        }
     except Exception:
-        return {"title": entry.title, "link": entry.link, "ai_comment": "분석 실패"}
+        return {"title": entry.title, "link": entry.link, "category": category, "ai_comment": "분석 실패"}
 
 def get_ai_summary():
-    rss_url = "https://news.google.com/rss/search?q=증시+미국주식+경제&hl=ko&gl=KR&ceid=KR:ko"
-    feed = feedparser.parse(rss_url)
-    target_news = feed.entries[:5]
+    # 4가지 핵심 분야 정의 (구글 뉴스 검색어 최적화)
+    search_queries = {
+        "🇺🇸 미국 실물경제": "미국 경제 지표 금리 물가",
+        "🇺🇸 미국 증시": "미국 증시 나스닥 S&P500",
+        "🇰🇷 한국 실물경제": "한국 경제 수출 금리 내수",
+        "🇰🇷 한국 증시": "한국 증시 코스피 삼성전자"
+    }
     
+    tasks = []
+    
+    # 각 분야별로 최신 뉴스 1개씩만 엄선해서 가져옴 (총 4개)
+    for category, query in search_queries.items():
+        # 검색어 URL 인코딩
+        encoded_query = query.replace(" ", "+")
+        rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=ko&gl=KR&ceid=KR:ko"
+        feed = feedparser.parse(rss_url)
+        
+        if feed.entries:
+            # (뉴스기사, 카테고리) 튜플 형태로 저장
+            tasks.append((feed.entries[0], category))
+    
+    # 병렬 처리 (4개를 동시에 분석)
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        results = list(executor.map(analyze_single_news, target_news))
+        results = list(executor.map(analyze_single_news, tasks))
+        
     return results
 
 # ==========================================
-# [6. UI 화면] 차트 로직 전면 수정
+# [6. UI 화면] 카테고리별 분리 표시
 # ==========================================
 display_model_name = MODEL_NAME.replace("models/", "")
 
@@ -158,52 +185,38 @@ col1, col2 = st.columns([2, 1], gap="medium")
 with col1:
     st.subheader("📊 자산 가치 변동 ($1,000 투자 시)")
     
-    # 1. 기간 선택 (1일 삭제됨)
-    # 2. 분석 기준 (단순비교 vs 달러환산)
     c1, c2 = st.columns([2, 1])
     with c1:
-        # [변경] 1일 옵션 삭제
         period_options = ["12개월", "6개월", "3개월", "1개월", "1주"]
         selected_period = st.radio(
             "조회 기간:", period_options, index=2, horizontal=True, label_visibility="collapsed"
         )
     with c2:
-        # [변경] 수익액 분석을 위한 환산 옵션
-        use_usd_base = st.toggle("💵 달러 환산 평가", value=True, help="켜면 한국 주식도 달러로 환전했을 때의 가치로 계산합니다.")
+        use_usd_base = st.toggle("💵 달러 환산 평가", value=True)
 
     with st.spinner('데이터 처리 중...'):
         df = get_stock_data()
         
         if not df.empty:
-            # 1. 기간 자르기
             days_map = {"12개월": 365, "6개월": 180, "3개월": 90, "1개월": 30, "1주": 7}
             start_date = df.index[-1] - timedelta(days=days_map[selected_period])
             df = df[df.index >= start_date]
 
-            # 2. 데이터 전처리 (환율 반영)
             if use_usd_base and 'USD/KRW' in df.columns and 'TIGER 200 (KR)' in df.columns:
-                # TIGER 200(원) / 환율 = TIGER 200(달러)
                 df['TIGER 200 (KR)'] = df['TIGER 200 (KR)'] / df['USD/KRW']
             
-            # 차트 그릴 컬럼 선택
             cols_to_plot = ['TIGER 200 (KR)', 'QQQ (US Nasdaq)', 'SPY (US S&P500)']
             cols_to_plot = [c for c in cols_to_plot if c in df.columns]
             df_view = df[cols_to_plot]
 
-            # 3. [핵심] 수익금($) 계산 로직
-            # "이 기간 초기에 $1,000를 투자했다면 지금 얼마인가?"
             if not df_view.empty:
-                initial_investment = 1000 # 기준 투자금: 1,000 달러
-                first_row = df_view.iloc[0].replace(0, 1) # 0 나누기 방지
-                
-                # (현재가 / 시작가) * 1000 = 현재 평가금액
+                initial_investment = 1000 
+                first_row = df_view.iloc[0].replace(0, 1)
                 df_value = (df_view / first_row) * initial_investment
                 
                 st.line_chart(df_value, color=["#FF4B4B", "#1C83E1", "#00C805"], width="stretch")
                 
-                # 최종 결과 요약 (메트릭)
                 last_row = df_value.iloc[-1]
-                
                 st.markdown("#### 💰 $1,000 투자 시 현재 평가액")
                 m1, m2, m3 = st.columns(3)
                 
@@ -211,34 +224,33 @@ with col1:
                     delta = value - 1000
                     col.metric(label, f"${value:,.2f}", f"{delta:+.2f} USD")
 
-                if 'TIGER 200 (KR)' in last_row:
-                    show_metric(m1, "TIGER 200", last_row['TIGER 200 (KR)'])
-                if 'QQQ (US Nasdaq)' in last_row:
-                    show_metric(m2, "QQQ (나스닥)", last_row['QQQ (US Nasdaq)'])
-                if 'SPY (US S&P500)' in last_row:
-                    show_metric(m3, "SPY (S&P500)", last_row['SPY (US S&P500)'])
-                    
+                if 'TIGER 200 (KR)' in last_row: show_metric(m1, "TIGER 200", last_row['TIGER 200 (KR)'])
+                if 'QQQ (US Nasdaq)' in last_row: show_metric(m2, "QQQ (나스닥)", last_row['QQQ (US Nasdaq)'])
+                if 'SPY (US S&P500)' in last_row: show_metric(m3, "SPY (S&P500)", last_row['SPY (US S&P500)'])
             else:
                 st.warning("표시할 데이터가 부족합니다.")
         else:
             st.error("데이터 수집 실패")
 
 with col2:
-    st.subheader("🤖 AI 실시간 시장 분석")
-    st.write(f"현재 **{display_model_name}** 모델이 대기 중입니다.")
+    st.subheader("🤖 AI 경제/증시 4분할 분석")
+    st.write(f"**{display_model_name}** 모델이 4대 분야 주요 뉴스를 분석합니다.")
     
-    if st.button(f"🚀 분석 실행 ({display_model_name})", type="primary", width="stretch"):
-        with st.spinner(f'{display_model_name} 모델이 심층 분석 중...'):
+    if st.button(f"🚀 4대 뉴스 분석 실행 ({display_model_name})", type="primary", width="stretch"):
+        with st.spinner('미국과 한국의 경제 뉴스를 읽고 있습니다...'):
             news_list = get_ai_summary()
+            
             if news_list:
                 for news in news_list:
-                    with st.expander(f"📰 {news['title']}", expanded=False):
+                    # [변경] 카테고리를 제목에 함께 표시하여 구분
+                    with st.expander(f"{news['category']} | {news['title'][:20]}...", expanded=True):
+                        st.caption(f"🔗 소스: {news['title']}")
                         st.success(news['ai_comment'])
-                        st.markdown(f"[원문 읽기]({news['link']})")
+                        st.markdown(f"[기사 원문 보기]({news['link']})")
             else:
                 st.warning("분석할 뉴스가 없습니다.")
     else:
-        st.info("👆 버튼을 누르면 AI가 뉴스를 요약해 드립니다.")
+        st.info("👆 버튼을 누르면 [미국 실물/증시, 한국 실물/증시] 뉴스를 각각 분석합니다.")
 
 st.markdown("---")
 st.markdown(f"<div style='text-align: center; color: gray;'>Created with Python & Streamlit | Engine: {display_model_name}</div>", unsafe_allow_html=True)
