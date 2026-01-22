@@ -4,13 +4,15 @@ import pandas as pd
 import feedparser
 import google.generativeai as genai
 from datetime import datetime, timedelta
-import concurrent.futures
 import os
+import time
+import requests
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # ==========================================
 # [1. 기본 설정]
 # ==========================================
-st.set_page_config(page_title="Quant Dashboard (Ver 3.1)", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="Quant Dashboard", layout="wide", page_icon="⚡")
 
 # ==========================================
 # [2. 보안] API 키 로드
@@ -50,11 +52,11 @@ if not GEMINI_API_KEY:
 # [3. 모델 선택]
 # ==========================================
 with st.sidebar:
-    st.header("⚙️ 엔진 설정 (2026 Ver)")
+    st.header("⚙️ 엔진 설정")
     
     model_options = {
-        "⚡ Gemini 2.5 Flash (속도/가성비)": "models/gemini-2.5-flash",
-        "🧠 Gemini 2.5 Pro (고지능/심층추론)": "models/gemini-2.5-pro",
+        "⚡ Gemini 2.5 Flash": "models/gemini-2.5-flash",
+        "🧠 Gemini 2.5 Pro": "models/gemini-2.5-pro",
     }
     
     selected_label = st.selectbox(
@@ -68,8 +70,6 @@ with st.sidebar:
         st.info("🧠 **Pro 모델:** 복잡한 시장 상황을 깊이 있게 분석합니다.")
     else:
         st.success("⚡ **Flash 모델:** 빠르고 효율적으로 뉴스를 요약합니다.")
-        
-    st.caption(f"ID: `{MODEL_NAME}`")
 
 # ==========================================
 # [4. AI 연결]
@@ -85,11 +85,8 @@ except Exception as e:
     model = None
 
 # ==========================================
-# [5. 기능 함수] 뉴스 소스 4분할 및 분석 (4개 슬롯 강제 고정)
+# [5. 기능 함수] 안정성 최우선 로직
 # ==========================================
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
-import time
-
 class MockEntry:
     """뉴스가 없을 때 사용할 빈 객체"""
     def __init__(self, title, link):
@@ -117,24 +114,28 @@ def get_stock_data():
     return pd.concat(data_list, axis=1).ffill() if data_list else pd.DataFrame()
 
 def analyze_single_news(item):
-    """ item: (entry, category) 형태의 튜플 """
+    """ AI 분석 수행 함수 (실패 시에도 무조건 텍스트 반환) """
     entry, category = item
     
-    # 1. 가짜 뉴스(Mock)인 경우 바로 리턴
-    if entry.link == "" or entry.link == "#":
+    # 1. 안전장치: 데이터 누락
+    if entry is None:
+         return {"title": "데이터 없음", "link": "#", "category": category, "ai_comment": "데이터 로드에 실패했습니다."}
+
+    # 2. 링크 누락 (가짜 뉴스 객체)
+    if not hasattr(entry, 'link') or entry.link in ["", "#", None]:
         return {
-            "title": entry.title, 
+            "title": getattr(entry, 'title', '제목 없음'), 
             "link": "#", 
             "category": category, 
-            "ai_comment": "현재 이 분야의 최신 뉴스를 가져오지 못했습니다. (검색 결과 없음)"
+            "ai_comment": "관련된 최신 뉴스를 찾을 수 없습니다."
         }
 
-    # 2. API 키 확인
+    # 3. 모델 확인
     if not model:
-        return {"title": entry.title, "link": entry.link, "category": category, "ai_comment": "API 키를 확인해주세요."}
+        return {"title": entry.title, "link": entry.link, "category": category, "ai_comment": "API 키가 연결되지 않았습니다."}
 
     try:
-        detail_level = "심층적으로" if "pro" in MODEL_NAME else "명확하게"
+        detail_level = "심층적으로" if "pro" in MODEL_NAME else "핵심만 명확하게"
         
         prompt = f"""
         당신은 30대 퀀트 투자자입니다. 
@@ -142,13 +143,13 @@ def analyze_single_news(item):
         기사 제목: "{entry.title}"
         
         1. 내용 요약 (한 줄)
-        2. 호재/악재/중립 판단
+        2. 시장 영향 (호재/악재/중립)
         3. 투자자 대응 ({detail_level})
         
-        '친근한 해요체'로 3줄 이내 답변. 빈칸 금지.
+        '친근한 해요체'로 3줄 이내 답변.
         """
         
-        # [안전 필터 해제 유지]
+        # 안전 필터 해제 (필수)
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -160,7 +161,7 @@ def analyze_single_news(item):
         result_text = response.text.strip()
         
         if not result_text:
-            result_text = "AI 분석 결과가 비어있습니다. 원문을 확인해주세요."
+            result_text = "AI 분석 결과를 생성하지 못했습니다. 원문을 참고해주세요."
 
         return {
             "title": entry.title,
@@ -169,62 +170,87 @@ def analyze_single_news(item):
             "ai_comment": result_text
         }
     except Exception as e:
+        # 에러 발생 시에도 빈 박스 대신 에러 메시지 출력
         return {
             "title": entry.title, 
             "link": entry.link, 
             "category": category, 
-            "ai_comment": f"분석 중 오류가 발생했습니다. ({str(e)})"
+            "ai_comment": f"분석 중 오류 발생: {str(e)}"
         }
 
-def get_ai_summary():
-    # [핵심] 4개의 카테고리를 리스트로 고정 (순서 보장)
-    # (카테고리명, [1순위 검색어, 2순위 검색어])
-    target_categories = [
-        ("🇺🇸 미국 실물경제", ["미국 경제 뉴스", "미국 연준 금리", "Federal Reserve"]),
-        ("🇺🇸 미국 증시", ["미국 증시", "나스닥 선물", "S&P500"]),
-        ("🇰🇷 한국 실물경제", ["한국 경제 뉴스", "한국 수출입", "한국은행 금리"]),
-        ("🇰🇷 한국 증시", ["한국 증시", "코스피 시황", "삼성전자 주가"])
+def get_ai_summary(status_container):
+    """ 
+    [박스 4개 보장 로직]
+    중간에 에러가 나도 절대 멈추지 않고, 빈 박스라도 채워 넣습니다.
+    """
+    
+    # 4개 분야 고정 (가장 확실한 검색어 1개씩만 사용)
+    categories = [
+        ("🇺🇸 미국 실물경제", "미국 경제 뉴스"),
+        ("🇺🇸 미국 증시", "미국 증시"),
+        ("🇰🇷 한국 실물경제", "한국 경제"),
+        ("🇰🇷 한국 증시", "한국 증시")
     ]
     
-    tasks = []
+    final_results = []
     
-    # 4번 반복하면서 무조건 채워넣음
-    for category, queries in target_categories:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    # 순차 처리 (Progress Bar 연동)
+    total_steps = len(categories)
+    
+    for i, (category, query) in enumerate(categories):
+        # 상태 업데이트 (UI)
+        status_container.progress((i + 1) / total_steps, text=f"🔍 {category} 분석 중...")
+        
         found_entry = None
         
-        # 검색어 돌아가면서 시도
-        for query in queries:
-            try:
-                encoded_query = query.replace(" ", "+")
-                rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=ko&gl=KR&ceid=KR:ko"
-                feed = feedparser.parse(rss_url)
-                
-                if feed.entries and len(feed.entries) > 0:
+        try:
+            # 1. 뉴스 검색
+            encoded_query = query.replace(" ", "+")
+            rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=ko&gl=KR&ceid=KR:ko"
+            
+            # 타임아웃 5초 설정 (무한 대기 방지)
+            response = requests.get(rss_url, headers=headers, timeout=5)
+            
+            if response.status_code == 200:
+                feed = feedparser.parse(response.content)
+                if feed.entries:
                     found_entry = feed.entries[0]
-                    break # 찾았으면 루프 탈출
-            except Exception:
-                continue
+            
+        except Exception:
+            # 검색 에러나면 그냥 넘어감 (found_entry는 None 상태)
+            pass
         
-        # [절대 규칙] 찾았으면 넣고, 못 찾았으면 '가짜 뉴스'라도 만들어서 넣는다.
-        if found_entry:
-            tasks.append((found_entry, category))
-        else:
-            # 여기가 실행되면 화면에 '검색 실패'라고 뜨더라도 박스는 생깁니다.
-            dummy = MockEntry(title="최신 기사를 찾지 못했습니다.", link="#")
-            tasks.append((dummy, category))
-    
-    # 병렬 처리
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        results = list(executor.map(analyze_single_news, tasks))
-        
-    return results
+        # 2. 검색 실패 시 Mock 객체 강제 주입
+        if not found_entry:
+            found_entry = MockEntry(title=f"'{query}' 관련 기사를 찾지 못했습니다.", link="#")
+            
+        # 3. AI 분석 실행 (이 결과는 무조건 append 됨)
+        try:
+            # 약간의 텀을 줘서 API 과부하 방지
+            time.sleep(0.5)
+            result = analyze_single_news((found_entry, category))
+            final_results.append(result)
+        except Exception as e:
+            # 최악의 경우에도 에러 박스 추가
+            final_results.append({
+                "title": "시스템 오류",
+                "link": "#",
+                "category": category,
+                "ai_comment": f"처리 실패: {e}"
+            })
+            
+    return final_results
 
 # ==========================================
-# [6. UI 화면] 카테고리별 분리 표시
+# [6. UI 화면]
 # ==========================================
 display_model_name = MODEL_NAME.replace("models/", "")
 
-st.title(f"⚡ AI 퀀트 대시보드 ({display_model_name})")
+st.title(f"⚡ AI 퀀트 대시보드")
 st.markdown("---")
 
 col1, col2 = st.columns([2, 1], gap="medium") 
@@ -281,21 +307,35 @@ with col1:
 
 with col2:
     st.subheader("🤖 AI 경제/증시 4분할 분석")
-    st.write(f"**{display_model_name}** 모델이 4대 분야 주요 뉴스를 분석합니다.")
+    st.write(f"현재 **{display_model_name}** 모델이 시장을 분석합니다.")
     
-    if st.button(f"🚀 4대 뉴스 분석 실행 ({display_model_name})", type="primary", width="stretch"):
-        with st.spinner('미국과 한국의 경제 뉴스를 읽고 있습니다...'):
-            news_list = get_ai_summary()
-            
-            if news_list:
-                for news in news_list:
-                    # [변경] 카테고리를 제목에 함께 표시하여 구분
-                    with st.expander(f"{news['category']} | {news['title'][:20]}...", expanded=True):
-                        st.caption(f"🔗 소스: {news['title']}")
-                        st.success(news['ai_comment'])
-                        st.markdown(f"[기사 원문 보기]({news['link']})")
-            else:
-                st.warning("분석할 뉴스가 없습니다.")
+    if st.button(f"🚀 분석 실행 ({display_model_name})", type="primary", width="stretch"):
+        # 진행바를 표시할 빈 공간 생성
+        status_container = st.empty()
+        
+        # 함수 실행 시 status_container를 넘겨줌
+        news_list = get_ai_summary(status_container)
+        
+        # 완료 후 진행바 제거
+        status_container.empty()
+        
+        if news_list:
+            for news in news_list:
+                category_text = news.get('category', '분야 미상')
+                title_text = news.get('title', '제목 없음')
+                ai_text = news.get('ai_comment', '')
+                link_text = news.get('link', '#')
+                
+                # AI 내용이 비어있으면 강제 문구 삽입
+                if not ai_text.strip():
+                    ai_text = "분석 내용을 생성하지 못했습니다."
+
+                with st.expander(f"{category_text} | {title_text[:20]}...", expanded=True):
+                    st.caption(f"🔗 소스: {title_text}")
+                    st.success(ai_text)
+                    st.markdown(f"[기사 원문 보기]({link_text})")
+        else:
+            st.warning("분석할 뉴스가 없습니다.")
     else:
         st.info("👆 버튼을 누르면 [미국 실물/증시, 한국 실물/증시] 뉴스를 각각 분석합니다.")
 
